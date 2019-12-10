@@ -18,6 +18,16 @@ Upgrade-Insecure-Requests: 1
 User-Agent: Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:70.0) Gecko/20100101 Firefox/70.0
 ```
 
+## Start
+
+Check [orian/echoserver](https://hub.docker.com/repository/docker/orian/echoserver) on DockerHub
+
+```
+docker run --rm -p 8080:8080 orian/echoserver
+```
+
+## Configuration
+
 The configuration is done through environmental variables:
 
  - `LISTEN_ADDR` is a comma separated list of addresses: `localhost:8080,:8081`,
