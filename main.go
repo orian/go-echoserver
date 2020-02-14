@@ -249,7 +249,13 @@ func main() {
 	}()
 
 	maybeStartHTTP(log, addrs, wg, done)
-	startPreStop(log, ":12345", wg, done)
+	if addr, ok := os.LookupEnv("PRE_STOP_ADDR"); ok {
+		log.Infof("will start preStop hook at %s/k8s/preStop", addr)
+		startPreStop(log, addr, wg, done)
+	} else {
+		log.Info("no PRE_STOP_ADDR will NOT start preStop hook")
+	}
+
 	wg.Wait()
 	log.Info("stop execution")
 }

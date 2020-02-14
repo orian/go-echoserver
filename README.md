@@ -48,3 +48,8 @@ SSL mode is configured through:
  - `DB_SSL_CERT` client certificate file.
  - `DB_SSL_KEY` client key file.
  - `DB_SSL_ROOT_CERT` server root certificate.
+
+Kubernetes preStop hook:
+
+ - `PRE_STOP_ADDR` an address to register pre stop hook, the handler is available
+ under `/k8s/preStop`. It gracefully stops the binary.
