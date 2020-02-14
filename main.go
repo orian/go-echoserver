@@ -142,63 +142,80 @@ var (
 	)
 )
 
+func newServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		TLSConfig:         nil,
+		ReadTimeout:       5 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      5 * time.Second,
+		IdleTimeout:       5 * time.Second,
+		MaxHeaderBytes:    1 << 16,
+	}
+}
+
+func startHTTP(log logrus.FieldLogger, addr string, wg *sync.WaitGroup, done chan bool) (*chi.Mux, *http.Server) {
+	m := chi.NewMux()
+	m.Get("/*", func(w http.ResponseWriter, r *http.Request) {
+		log.WithField("listen", addr).Infof("request %s", r.URL.String())
+		data, err := httputil.DumpRequest(r, false)
+		if err != nil {
+			log.WithError(err).Error("dumping request")
+		} else {
+			w.Header().Set("Content-Type", "text/plain")
+			if n, err := w.Write(data); err != nil {
+				log.WithError(err).Errorf("writing content (wrote %d bytes)", n)
+			}
+		}
+	})
+	if metricsPath, ok := os.LookupEnv("METRICS_PATH"); ok {
+		if metricsPath != "" {
+			log.Infof("register metrics at: %s%s", addr, metricsPath)
+			m.Get(metricsPath, promhttp.Handler().ServeHTTP)
+		} else {
+			log.Info("skip metrics registration")
+		}
+	} else {
+		log.Info("register metrics at: /metrics")
+		m.Get("/metrics", promhttp.Handler().ServeHTTP)
+	}
+
+	s := newServer(addr, promhttp.InstrumentHandlerCounter(promHttpReqTotal, m))
+	go func() {
+		<-done
+		log.Infof("got done, closing %s", s.Addr)
+		if err := s.Shutdown(context.Background()); err != nil {
+			log.WithError(err).Error("nice shutdown of: %s", s.Addr)
+		}
+	}()
+	wg.Add(1)
+	log.Infof("Listen at %s", s.Addr)
+	go func() {
+		defer wg.Done()
+		if err := s.ListenAndServe(); err == http.ErrServerClosed {
+			log.Infof("graceful shutdown: %s", s.Addr)
+		} else if err != nil {
+			log.WithError(err).Errorf("server: %s", s.Addr)
+		}
+	}()
+	return m, s
+}
+
 func maybeStartHTTP(log logrus.FieldLogger, addrs []string, wg *sync.WaitGroup, done chan bool) {
 	for _, addr := range addrs {
-		m := chi.NewMux()
-		m.Get("/*", func(w http.ResponseWriter, r *http.Request) {
-			log.WithField("listen", addr).Infof("request %s", r.URL.String())
-			data, err := httputil.DumpRequest(r, false)
-			if err != nil {
-				log.WithError(err).Error("dumping request")
-			} else {
-				w.Header().Set("Content-Type", "text/plain")
-				if n, err := w.Write(data); err != nil {
-					log.WithError(err).Errorf("writing content (wrote %d bytes)", n)
-				}
-			}
-		})
-		if metricsPath, ok := os.LookupEnv("METRICS_PATH"); ok {
-			if metricsPath != "" {
-				log.Infof("register metrics at: %s%s", addr, metricsPath)
-				m.Get(metricsPath, promhttp.Handler().ServeHTTP)
-			} else {
-				log.Info("skip metrics registration")
-			}
-		} else {
-			log.Info("register metrics at: /metrics")
-			m.Get("/metrics", promhttp.Handler().ServeHTTP)
-		}
-
-		handler := promhttp.InstrumentHandlerCounter(promHttpReqTotal, m)
-
-		s := http.Server{
-			Addr:              addr,
-			Handler:           handler,
-			TLSConfig:         nil,
-			ReadTimeout:       5 * time.Second,
-			ReadHeaderTimeout: 5 * time.Second,
-			WriteTimeout:      5 * time.Second,
-			IdleTimeout:       5 * time.Second,
-			MaxHeaderBytes:    1 << 16,
-		}
-		go func() {
-			<-done
-			log.Infof("got done, closing %s", s.Addr)
-			if err := s.Shutdown(context.Background()); err != nil {
-				log.WithError(err).Error("nice shutdown of: %s", s.Addr)
-			}
-		}()
-		wg.Add(1)
-		log.Infof("Listen at %s", s.Addr)
-		go func() {
-			defer wg.Done()
-			if err := s.ListenAndServe(); err == http.ErrServerClosed {
-				log.Infof("graceful shutdown: %s", s.Addr)
-			} else if err != nil {
-				log.WithError(err).Errorf("server: %s", s.Addr)
-			}
-		}()
+		startHTTP(log, addr, wg, done)
 	}
+}
+
+func startPreStop(log logrus.FieldLogger, addr string, wg *sync.WaitGroup, done chan bool) {
+	m, _ := startHTTP(log, addr, wg, done)
+	m.Get("/k8s/preStop", func(w http.ResponseWriter, r *http.Request) {
+		log.Info("Kubernetes requested us to stop")
+		close(done)
+		wg.Wait()
+		w.WriteHeader(http.StatusNoContent)
+	})
 }
 
 func main() {
@@ -227,12 +244,12 @@ func main() {
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		sig := <-sigs
-		fmt.Println()
 		fmt.Println(sig)
 		close(done)
 	}()
 
 	maybeStartHTTP(log, addrs, wg, done)
+	startPreStop(log, ":12345", wg, done)
 	wg.Wait()
 	log.Info("stop execution")
 }
